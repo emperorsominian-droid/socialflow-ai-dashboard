@@ -26,9 +26,15 @@ export async function orgMiddleware(
   }
   const orgId = parsed.data;
 
-  const membership = await prisma.organizationMember.findUnique({
-    where: { organizationId_userId: { organizationId: orgId, userId: req.user!.id } },
-  });
+  let membership;
+  try {
+    membership = await prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: orgId, userId: req.user!.id } },
+    });
+  } catch (err) {
+    next(err);
+    return;
+  }
 
   if (!membership) {
     res.status(403).json({ message: 'Not a member of this organization' });
