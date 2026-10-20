@@ -342,7 +342,7 @@ export class BillingService {
       }
       case 'customer.subscription.deleted': {
         const stripeSub = event.data.object as Stripe.Subscription;
-        const sub = await prisma.subscription.findFirst({
+        const sub = await prisma.subscription.findUnique({
           where: { stripeSubscriptionId: stripeSub.id },
         });
         if (sub) {
@@ -378,7 +378,7 @@ export class BillingService {
       }
       case 'invoice.payment_failed': {
         const invoice = event.data.object as Stripe.Invoice;
-        const sub = await prisma.subscription.findFirst({
+        const sub = await prisma.subscription.findUnique({
           where: { stripeCustomerId: invoice.customer as string },
         });
         if (sub) {
@@ -394,7 +394,7 @@ export class BillingService {
 
   private async syncSubscription(stripeSub: Stripe.Subscription): Promise<void> {
     const customerId = stripeSub.customer as string;
-    const sub = await prisma.subscription.findFirst({ where: { stripeCustomerId: customerId } });
+    const sub = await prisma.subscription.findUnique({ where: { stripeCustomerId: customerId } });
     if (!sub) {
       logger.warn('No local subscription for Stripe customer', { customerId });
       return;
@@ -453,7 +453,7 @@ export class BillingService {
   private async onPaymentSucceeded(invoice: Stripe.Invoice): Promise<void> {
     if (invoice.billing_reason !== 'subscription_cycle') return;
 
-    const sub = await prisma.subscription.findFirst({
+    const sub = await prisma.subscription.findUnique({
       where: { stripeCustomerId: invoice.customer as string },
     });
     if (!sub) return;
