@@ -75,6 +75,29 @@ export async function assertSafeUrl(url: string): Promise<void> {
 }
 
 const MAX_ATTEMPTS = 5;
+const MAX_RESPONSE_BODY_BYTES = 1000;
+
+/**
+ * Read at most `maxBytes` of a response body, then cancel the stream so a
+ * hostile subscriber cannot make us buffer an arbitrarily large response.
+ */
+export async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (received < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8');
+}
 const TIMEOUT_MS = 10_000; // 10 s per request
 // Exponential back-off delays in ms: 1 min, 5 min, 30 min, 2 h, 8 h
 const RETRY_DELAYS_MS = [60_000, 300_000, 1_800_000, 7_200_000, 28_800_000];
@@ -220,7 +243,7 @@ export async function attemptDelivery(
 
     clearTimeout(timer);
     responseStatus = res.status;
-    responseBody = (await res.text()).slice(0, 1000); // cap stored body
+    responseBody = await readBodyCapped(res, MAX_RESPONSE_BODY_BYTES); // cap stored body
 
     if (res.ok) {
       await prisma.webhookDelivery.update({

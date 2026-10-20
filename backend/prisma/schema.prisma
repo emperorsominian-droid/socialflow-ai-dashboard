@@ -308,3 +308,9 @@ model Subscription {
   creditsMonthly         Int
   currentPeriodEnd       DateTime?
   createdAt
+
+model StripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+}

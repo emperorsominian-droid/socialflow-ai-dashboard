@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { prisma } from '../lib/prisma';
 import { createLogger } from '../lib/logger';
@@ -270,20 +271,35 @@ export class BillingService {
 
     logger.info('Stripe webhook received', { type: event.type });
 
+    await prisma.$transaction(async (db) => {
+      // Insert-or-skip: a replayed event.id hits the PK and is ignored.
+      const inserted = await db.stripeEvent.createMany({
+        data: [{ id: event.id, type: event.type }],
+        skipDuplicates: true,
+      });
+      if (inserted.count === 0) {
+        logger.info('Duplicate Stripe event ignored', { eventId: event.id, type: event.type });
+        return;
+      }
+      await this.applyEvent(db, event);
+    });
+  }
+
+  private async applyEvent(db: Prisma.TransactionClient, event: Stripe.Event): Promise<void> {
     switch (event.type) {
       case 'customer.subscription.created':
       case 'customer.subscription.updated': {
         const stripeSub = event.data.object as Stripe.Subscription;
-        await this.syncSubscription(stripeSub);
+        await this.syncSubscription(db, stripeSub);
         break;
       }
       case 'customer.subscription.deleted': {
         const stripeSub = event.data.object as Stripe.Subscription;
-        const sub = await prisma.subscription.findFirst({
+        const sub = await db.subscription.findFirst({
           where: { stripeSubscriptionId: stripeSub.id },
         });
         if (sub) {
-          await prisma.subscription.update({
+          await db.subscription.update({
             where: { userId: sub.userId },
             data: { status: 'canceled', stripeSubscriptionId: null },
           });
@@ -292,16 +308,16 @@ export class BillingService {
       }
       case 'invoice.payment_succeeded': {
         const invoice = event.data.object as Stripe.Invoice;
-        await this.onPaymentSucceeded(invoice);
+        await this.onPaymentSucceeded(db, invoice);
         break;
       }
       case 'invoice.payment_failed': {
         const invoice = event.data.object as Stripe.Invoice;
-        const sub = await prisma.subscription.findFirst({
+        const sub = await db.subscription.findFirst({
           where: { stripeCustomerId: invoice.customer as string },
         });
         if (sub) {
-          await prisma.subscription.update({
+          await db.subscription.update({
             where: { userId: sub.userId },
             data: { status: 'past_due' },
           });
@@ -311,9 +327,9 @@ export class BillingService {
     }
   }
 
-  private async syncSubscription(stripeSub: Stripe.Subscription): Promise<void> {
+  private async syncSubscription(db: Prisma.TransactionClient, stripeSub: Stripe.Subscription): Promise<void> {
     const customerId = stripeSub.customer as string;
-    const sub = await prisma.subscription.findFirst({ where: { stripeCustomerId: customerId } });
+    const sub = await db.subscription.findFirst({ where: { stripeCustomerId: customerId } });
     if (!sub) {
       logger.warn('No local subscription for Stripe customer', { customerId });
       return;
@@ -324,7 +340,7 @@ export class BillingService {
     const product = price.product as Stripe.Product;
     const plan = (product.metadata?.plan as SubscriptionPlan) ?? 'starter';
 
-    await prisma.subscription.update({
+    await db.subscription.update({
       where: { userId: sub.userId },
       data: {
         plan,
@@ -337,20 +353,20 @@ export class BillingService {
     });
   }
 
-  private async onPaymentSucceeded(invoice: Stripe.Invoice): Promise<void> {
+  private async onPaymentSucceeded(db: Prisma.TransactionClient, invoice: Stripe.Invoice): Promise<void> {
     if (invoice.billing_reason !== 'subscription_cycle') return;
 
-    const sub = await prisma.subscription.findFirst({
+    const sub = await db.subscription.findFirst({
       where: { stripeCustomerId: invoice.customer as string },
     });
     if (!sub) return;
 
     const monthly = PLAN_CREDITS[sub.plan as SubscriptionPlan];
-    await prisma.subscription.update({
+    await db.subscription.update({
       where: { userId: sub.userId },
       data: { creditsRemaining: monthly, creditsMonthly: monthly },
     });
-    await prisma.creditLog.create({
+    await db.creditLog.create({
       data: {
         userId: sub.userId,
         action: 'credit:reset',

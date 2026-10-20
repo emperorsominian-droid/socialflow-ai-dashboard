@@ -7,16 +7,26 @@
  *  - missing signature header -> rejected and NOT enqueued
  */
 
-const mockAdd = jest.fn().mockResolvedValue({ id: 'job-1' });
+const mockAdd = jest.fn().mockResolvedValue([{ id: 'job-1' }]);
 
 jest.mock('../../queues/twitterWebhookQueue', () => ({
-  twitterWebhookQueue: { add: mockAdd },
+  twitterWebhookQueue: { addBulk: mockAdd },
+  mapTwitterEvent: () => [{ eventType: 'tweet_create', payload: {} }],
 }));
 
 jest.mock('../../lib/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+  createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
+}));
+
+jest.mock('../../config/config', () => ({
+  config: {
+    get TWITTER_WEBHOOK_SECRET() {
+      return process.env.TWITTER_WEBHOOK_SECRET;
+    },
+  },
 }));
 
 import crypto from 'crypto';
@@ -39,7 +49,7 @@ function buildApp() {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const router = require('../twitter-webhook').default;
   const app = express();
-  app.use(router);
+  app.use('/webhooks/twitter', router);
   return app;
 }
 
@@ -99,5 +109,12 @@ describe('twitter-webhook route', () => {
 
     expect([401, 403]).toContain(res.status);
     expect(mockAdd).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits the unauthenticated CRC GET endpoint', async () => {
+    const app = buildApp();
+    const res = await request(app).get('/webhooks/twitter').query({ crc_token: 'abc' });
+    expect(res.status).toBe(200);
+    expect(res.headers['ratelimit-limit']).toBeDefined();
   });
 });
