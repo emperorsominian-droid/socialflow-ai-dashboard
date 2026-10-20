@@ -1,6 +1,7 @@
-import Redis from 'ioredis';
+import type Redis from 'ioredis';
 import crypto from 'crypto';
-import { getConfiguredQueueNames, getRedisConnection } from '../config/runtime';
+import { getConfiguredQueueNames } from '../config/runtime';
+import { redis } from '../lib/redis';
 import { Logger } from '../lib/logger';
 import {
   ADMIN_MIGRATIONS_SET_KEY,
@@ -203,174 +204,163 @@ async function validateMigrationChecksum(
 }
 
 export const listMigrations = async (): Promise<MigrationStatus[]> => {
-  const redis = new Redis(getRedisConnection());
+  const applied = new Set(await redis.smembers(ADMIN_MIGRATIONS_SET_KEY));
 
-  try {
-    const applied = new Set(await redis.smembers(ADMIN_MIGRATIONS_SET_KEY));
-
-    const statuses: MigrationStatus[] = [];
-    for (const migration of migrations) {
-      const metadata = await getMigrationMetadata(redis, migration.name);
-      statuses.push({
-        name: migration.name,
-        description: migration.description,
-        applied: applied.has(migration.name),
-        checksum: metadata?.checksum,
-        appliedAt: metadata?.appliedAt,
-        error: metadata?.error,
-      });
-    }
-
-    return statuses;
-  } finally {
-    redis.disconnect();
+  const statuses: MigrationStatus[] = [];
+  for (const migration of migrations) {
+    const metadata = await getMigrationMetadata(redis, migration.name);
+    statuses.push({
+      name: migration.name,
+      description: migration.description,
+      applied: applied.has(migration.name),
+      checksum: metadata?.checksum,
+      appliedAt: metadata?.appliedAt,
+      error: metadata?.error,
+    });
   }
+
+  return statuses;
 };
 
 export const runMigrations = async (
   options: RunMigrationsOptions,
   logger: Logger,
 ): Promise<RunMigrationsResult> => {
-  const redis = new Redis(getRedisConnection());
   const errors: Record<string, string> = {};
 
+  // Attempt to acquire lock
+  const lockAcquired = await acquireMigrationLock(redis, logger);
+  if (!lockAcquired && !options.dryRun) {
+    logger.error('Could not acquire migration lock - another migration may be in progress');
+    return {
+      executed: [],
+      skipped: [],
+      failed: [],
+      dryRun: false,
+      lockAcquired: false,
+    };
+  }
+
   try {
-    // Attempt to acquire lock
-    const lockAcquired = await acquireMigrationLock(redis, logger);
-    if (!lockAcquired && !options.dryRun) {
-      logger.error('Could not acquire migration lock - another migration may be in progress');
+    const applied = new Set(await redis.smembers(ADMIN_MIGRATIONS_SET_KEY));
+    const matchingMigrations = migrations.filter(
+      (migration) => !options.name || migration.name === options.name,
+    );
+    const pending = matchingMigrations.filter(
+      (migration) => !applied.has(migration.name) || options.force,
+    );
+
+    if (pending.length === 0) {
       return {
         executed: [],
-        skipped: [],
+        skipped: matchingMigrations.map((migration) => migration.name),
         failed: [],
-        dryRun: false,
-        lockAcquired: false,
+        dryRun: Boolean(options.dryRun),
+        lockAcquired: true,
       };
     }
 
-    try {
-      const applied = new Set(await redis.smembers(ADMIN_MIGRATIONS_SET_KEY));
-      const matchingMigrations = migrations.filter(
-        (migration) => !options.name || migration.name === options.name,
-      );
-      const pending = matchingMigrations.filter(
-        (migration) => !applied.has(migration.name) || options.force,
-      );
+    const executed: string[] = [];
+    const failed: string[] = [];
 
-      if (pending.length === 0) {
-        return {
-          executed: [],
-          skipped: matchingMigrations.map((migration) => migration.name),
-          failed: [],
+    for (const migration of pending) {
+      try {
+        logger.info('Running migration', {
+          migration: migration.name,
           dryRun: Boolean(options.dryRun),
-          lockAcquired: true,
-        };
-      }
+        });
 
-      const executed: string[] = [];
-      const failed: string[] = [];
-
-      for (const migration of pending) {
-        try {
-          logger.info('Running migration', {
-            migration: migration.name,
-            dryRun: Boolean(options.dryRun),
-          });
-
-          // Validate checksum if migration was previously applied
-          const isValid = await validateMigrationChecksum(redis, migration, logger);
-          if (!isValid && !options.force) {
-            const errorMsg = `Checksum validation failed - migration may have been modified`;
-            logger.error('Migration checksum validation failed', {
-              migration: migration.name,
-              error: errorMsg,
-            });
-            errors[migration.name] = errorMsg;
-            failed.push(migration.name);
-            continue;
-          }
-
-          if (!options.dryRun) {
-            const startTime = Date.now();
-            try {
-              const result = await migration.run({ redis, logger });
-              const durationMs = Date.now() - startTime;
-
-              // Store metadata for this migration
-              const currentChecksum = calculateMigrationChecksum(migration);
-              const metadata: MigrationMetadata = {
-                name: migration.name,
-                checksum: currentChecksum,
-                appliedAt: Date.now(),
-                durationMs,
-                result,
-              };
-
-              await storeMigrationMetadata(redis, metadata);
-              await redis.sadd(ADMIN_MIGRATIONS_SET_KEY, migration.name);
-
-              logger.info('Migration completed successfully', {
-                migration: migration.name,
-                durationMs,
-              });
-              executed.push(migration.name);
-            } catch (migrationError) {
-              const errorMsg =
-                migrationError instanceof Error
-                  ? migrationError.message
-                  : String(migrationError);
-
-              logger.error('Migration failed', {
-                migration: migration.name,
-                error: errorMsg,
-              });
-
-              // Store error metadata
-              const currentChecksum = calculateMigrationChecksum(migration);
-              const metadata: MigrationMetadata = {
-                name: migration.name,
-                checksum: currentChecksum,
-                appliedAt: Date.now(),
-                durationMs: Date.now() - startTime,
-                error: errorMsg,
-              };
-
-              await storeMigrationMetadata(redis, metadata);
-              errors[migration.name] = errorMsg;
-              failed.push(migration.name);
-            }
-          } else {
-            executed.push(migration.name);
-          }
-        } catch (error) {
-          const errorMsg =
-            error instanceof Error ? error.message : String(error);
-          logger.error('Unexpected error processing migration', {
+        // Validate checksum if migration was previously applied
+        const isValid = await validateMigrationChecksum(redis, migration, logger);
+        if (!isValid && !options.force) {
+          const errorMsg = `Checksum validation failed - migration may have been modified`;
+          logger.error('Migration checksum validation failed', {
             migration: migration.name,
             error: errorMsg,
           });
           errors[migration.name] = errorMsg;
           failed.push(migration.name);
+          continue;
         }
-      }
 
-      return {
-        executed,
-        skipped: matchingMigrations
-          .filter((migration) => applied.has(migration.name) && !options.force)
-          .map((migration) => migration.name),
-        failed,
-        dryRun: Boolean(options.dryRun),
-        lockAcquired: true,
-        errors: Object.keys(errors).length > 0 ? errors : undefined,
-      };
-    } finally {
-      if (!options.dryRun) {
-        await releaseMigrationLock(redis, logger);
+        if (!options.dryRun) {
+          const startTime = Date.now();
+          try {
+            const result = await migration.run({ redis, logger });
+            const durationMs = Date.now() - startTime;
+
+            // Store metadata for this migration
+            const currentChecksum = calculateMigrationChecksum(migration);
+            const metadata: MigrationMetadata = {
+              name: migration.name,
+              checksum: currentChecksum,
+              appliedAt: Date.now(),
+              durationMs,
+              result,
+            };
+
+            await storeMigrationMetadata(redis, metadata);
+            await redis.sadd(ADMIN_MIGRATIONS_SET_KEY, migration.name);
+
+            logger.info('Migration completed successfully', {
+              migration: migration.name,
+              durationMs,
+            });
+            executed.push(migration.name);
+          } catch (migrationError) {
+            const errorMsg =
+              migrationError instanceof Error
+                ? migrationError.message
+                : String(migrationError);
+
+            logger.error('Migration failed', {
+              migration: migration.name,
+              error: errorMsg,
+            });
+
+            // Store error metadata
+            const currentChecksum = calculateMigrationChecksum(migration);
+            const metadata: MigrationMetadata = {
+              name: migration.name,
+              checksum: currentChecksum,
+              appliedAt: Date.now(),
+              durationMs: Date.now() - startTime,
+              error: errorMsg,
+            };
+
+            await storeMigrationMetadata(redis, metadata);
+            errors[migration.name] = errorMsg;
+            failed.push(migration.name);
+          }
+        } else {
+          executed.push(migration.name);
+        }
+      } catch (error) {
+        const errorMsg =
+          error instanceof Error ? error.message : String(error);
+        logger.error('Unexpected error processing migration', {
+          migration: migration.name,
+          error: errorMsg,
+        });
+        errors[migration.name] = errorMsg;
+        failed.push(migration.name);
       }
     }
+
+    return {
+      executed,
+      skipped: matchingMigrations
+        .filter((migration) => applied.has(migration.name) && !options.force)
+        .map((migration) => migration.name),
+      failed,
+      dryRun: Boolean(options.dryRun),
+      lockAcquired: true,
+      errors: Object.keys(errors).length > 0 ? errors : undefined,
+    };
   } finally {
-    redis.disconnect();
+    if (!options.dryRun) {
+      await releaseMigrationLock(redis, logger);
+    }
   }
 };
 
@@ -378,8 +368,6 @@ export const rollbackMigration = async (
   migrationName: string,
   logger: Logger,
 ): Promise<{ success: boolean; error?: string }> => {
-  const redis = new Redis(getRedisConnection());
-
   try {
     const migration = migrations.find((m) => m.name === migrationName);
     if (!migration) {
@@ -405,7 +393,5 @@ export const rollbackMigration = async (
     const errorMsg = error instanceof Error ? error.message : String(error);
     logger.error('Rollback failed', { migration: migrationName, error: errorMsg });
     return { success: false, error: errorMsg };
-  } finally {
-    redis.disconnect();
   }
 };

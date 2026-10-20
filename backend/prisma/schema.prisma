@@ -14,6 +14,10 @@ model User {
   lastPasswordChange  DateTime             @default(now())
   listings            Listing[]            @relation("MentorListings")
   passwordHistory     PasswordHistory[]
+  auditLogs           AuditLog[]
+  aiGenerationResults AIGenerationResult[]
+  ttsJobs             TTSJob[]
+  webhookSubscriptions WebhookSubscription[]
   refreshTokens       RefreshToken[]
   createdAt           DateTime             @default(now())
   deletedAt           DateTime?
@@ -159,7 +163,8 @@ model DynamicConfig {
 
 model AuditLog {
   id             String   @id @default(uuid())
-  userId         String
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   action         String
   organizationId String?
   resource       String?
@@ -178,6 +183,7 @@ model AIGenerationResult {
   id             String   @id @default(uuid())
   jobId          String   @unique
   userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   organizationId String?
   jobType        String
   output         Json
@@ -213,6 +219,7 @@ model Listing {
 model WebhookSubscription {
   id        String            @id @default(uuid())
   userId    String?
+  user      User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
   url       String
   secret    String
   events    String[]
@@ -257,6 +264,7 @@ model TTSJob {
   segments        Json?
   error           String?
   userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

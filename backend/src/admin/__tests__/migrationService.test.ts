@@ -81,7 +81,6 @@ describe('listMigrations', () => {
       checksum: undefined,
       appliedAt: undefined,
     });
-    expect(mockRedis.disconnect).toHaveBeenCalled();
   });
 
   it('reports applied status and metadata once the migration has run', async () => {
@@ -98,12 +97,6 @@ describe('listMigrations', () => {
       checksum: 'abc123',
       appliedAt: 111,
     });
-  });
-
-  it('disconnects the Redis client even if a lookup throws', async () => {
-    mockRedis.smembers.mockRejectedValueOnce(new Error('connection reset'));
-    await expect(listMigrations()).rejects.toThrow('connection reset');
-    expect(mockRedis.disconnect).toHaveBeenCalled();
   });
 });
 
@@ -243,11 +236,5 @@ describe('rollbackMigration', () => {
 
     expect(result).toEqual({ success: false, error: 'rollback boom' });
     expect(fakeLogger.error).toHaveBeenCalled();
-  });
-
-  it('disconnects the Redis client afterwards', async () => {
-    mockRedis.sismember.mockResolvedValue(1);
-    await rollbackMigration(MIGRATION_NAME, fakeLogger);
-    expect(mockRedis.disconnect).toHaveBeenCalled();
   });
 });
