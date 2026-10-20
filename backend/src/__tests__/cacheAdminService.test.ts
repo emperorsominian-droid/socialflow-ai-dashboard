@@ -1,8 +1,18 @@
-jest.mock('ioredis');
-jest.mock('../config/runtime');
+const mockScan = jest.fn();
+const mockUnlink = jest.fn();
+const mockInfo = jest.fn();
+const mockDbsize = jest.fn();
 
-import Redis from 'ioredis';
-import { clearCache, getCacheStats } from '../admin/cacheAdminService';
+jest.mock('../lib/redis', () => ({
+  redis: {
+    scan: (...args: unknown[]) => mockScan(...args),
+    unlink: (...args: unknown[]) => mockUnlink(...args),
+    info: (...args: unknown[]) => mockInfo(...args),
+    dbsize: (...args: unknown[]) => mockDbsize(...args),
+  },
+}));
+
+import { clearCache, getCacheStats, MAX_KEYS_PER_CALL } from '../admin/cacheAdminService';
 import type { Logger } from '../lib/logger';
 
 const mockLogger: Logger = {
@@ -12,22 +22,8 @@ const mockLogger: Logger = {
   debug: jest.fn(),
 };
 
-const mockScan = jest.fn();
-const mockUnlink = jest.fn();
-const mockInfo = jest.fn();
-const mockDbsize = jest.fn();
-const mockDisconnect = jest.fn();
-
 beforeEach(() => {
-  jest.clearAllMocks();
-
-  (Redis as unknown as jest.Mock).mockImplementation(() => ({
-    scan: mockScan,
-    unlink: mockUnlink,
-    info: mockInfo,
-    dbsize: mockDbsize,
-    disconnect: mockDisconnect,
-  }));
+  jest.resetAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -63,26 +59,38 @@ describe('clearCache — key-pattern invalidation', () => {
     expect(mockUnlink).toHaveBeenCalledWith('key:1', 'key:2', 'key:3');
   });
 
-  it('batches deletion when keys exceed batchSize', async () => {
-    const keys = Array.from({ length: 5 }, (_, i) => `k:${i}`);
-    mockScan.mockResolvedValueOnce(['0', keys]);
-    mockUnlink.mockResolvedValueOnce(2).mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+  it('unlinks each scanned batch as it is read, without accumulating keys', async () => {
+    mockScan
+      .mockResolvedValueOnce(['7', ['k:0', 'k:1']])
+      .mockResolvedValueOnce(['0', ['k:2']]);
+    mockUnlink.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
 
     const result = await clearCache({ pattern: 'k:*', batchSize: 2 }, mockLogger);
 
-    expect(mockUnlink).toHaveBeenCalledTimes(3);
+    expect(mockUnlink).toHaveBeenCalledTimes(2);
     expect(mockUnlink).toHaveBeenNthCalledWith(1, 'k:0', 'k:1');
-    expect(mockUnlink).toHaveBeenNthCalledWith(2, 'k:2', 'k:3');
-    expect(mockUnlink).toHaveBeenNthCalledWith(3, 'k:4');
-    expect(result.deletedKeys).toBe(5);
-    expect(result.matchedKeys).toBe(5);
+    expect(mockUnlink).toHaveBeenNthCalledWith(2, 'k:2');
+    expect(result.deletedKeys).toBe(3);
+    expect(result.matchedKeys).toBe(3);
+  });
+
+  it('stops at the per-call key limit and warns', async () => {
+    const keys = Array.from({ length: MAX_KEYS_PER_CALL }, (_, i) => `k:${i}`);
+    mockScan.mockResolvedValueOnce(['9', keys]);
+    mockUnlink.mockResolvedValueOnce(keys.length);
+
+    const result = await clearCache({ pattern: 'k:*', batchSize: 100 }, mockLogger);
+
+    expect(mockScan).toHaveBeenCalledTimes(1);
+    expect(result.matchedKeys).toBe(MAX_KEYS_PER_CALL);
+    expect(mockLogger.warn).toHaveBeenCalled();
   });
 
   it('handles multi-cursor SCAN iteration', async () => {
     mockScan
       .mockResolvedValueOnce(['42', ['a', 'b']])
       .mockResolvedValueOnce(['0', ['c']]);
-    mockUnlink.mockResolvedValueOnce(3);
+    mockUnlink.mockResolvedValueOnce(2).mockResolvedValueOnce(1);
 
     const result = await clearCache({ pattern: '*', batchSize: 100 }, mockLogger);
 
@@ -128,29 +136,12 @@ describe('clearCache — key-pattern invalidation', () => {
     await clearCache({ pattern: 'dry:*', batchSize: 50, dryRun: true }, mockLogger);
 
     expect(mockLogger.info).toHaveBeenCalledWith(
-      'Cache clear scan completed',
+      'Cache clear completed',
       expect.objectContaining({ matchedKeys: 1, deletedKeys: 0, dryRun: true }),
     );
     expect(mockUnlink).not.toHaveBeenCalled();
   });
 
-  it('disconnects Redis in the finally block even when scan throws', async () => {
-    mockScan.mockRejectedValueOnce(new Error('Redis connection lost'));
-
-    await expect(
-      clearCache({ pattern: '*', batchSize: 100 }, mockLogger),
-    ).rejects.toThrow('Redis connection lost');
-
-    expect(mockDisconnect).toHaveBeenCalledTimes(1);
-  });
-
-  it('disconnects Redis after a successful run', async () => {
-    mockScan.mockResolvedValueOnce(['0', []]);
-
-    await clearCache({ pattern: 'none:*', batchSize: 100 }, mockLogger);
-
-    expect(mockDisconnect).toHaveBeenCalledTimes(1);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -199,24 +190,6 @@ describe('getCacheStats — cache stats reporting', () => {
       'Cache stats collected',
       expect.objectContaining({ totalKeys: 7 }),
     );
-  });
-
-  it('disconnects Redis after collecting stats', async () => {
-    mockInfo.mockResolvedValueOnce(sampleInfo);
-    mockDbsize.mockResolvedValueOnce(0);
-
-    await getCacheStats(mockLogger);
-
-    expect(mockDisconnect).toHaveBeenCalledTimes(1);
-  });
-
-  it('disconnects Redis in finally block when info throws', async () => {
-    mockInfo.mockRejectedValueOnce(new Error('timeout'));
-    mockDbsize.mockResolvedValueOnce(0);
-
-    await expect(getCacheStats(mockLogger)).rejects.toThrow('timeout');
-
-    expect(mockDisconnect).toHaveBeenCalledTimes(1);
   });
 
   it('handles empty INFO response gracefully with zero defaults', async () => {

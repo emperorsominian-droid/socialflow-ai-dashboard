@@ -1,7 +1,6 @@
 import { Logger } from '../lib/logger';
 import { getDiscoveredQueueNames, retryFailedJobs } from '../admin/jobAdminService';
 import { getConfiguredQueueNames } from '../config/runtime';
-import Redis from 'ioredis';
 import { Queue } from 'bullmq';
 
 jest.mock('../config/runtime', () => ({
@@ -9,12 +8,11 @@ jest.mock('../config/runtime', () => ({
   getRedisConnection: jest.fn(),
 }));
 
-jest.mock('ioredis', () => {
-  return jest.fn().mockImplementation(() => ({
-    smembers: jest.fn(),
-    disconnect: jest.fn(),
-  }));
-});
+const mockSmembers = jest.fn();
+
+jest.mock('../lib/redis', () => ({
+  redis: { smembers: (...args: unknown[]) => mockSmembers(...args) },
+}));
 
 jest.mock('bullmq', () => ({
   Queue: jest.fn(),
@@ -29,7 +27,6 @@ describe('jobAdminService', () => {
   } as unknown as Logger;
 
   const mockedGetConfiguredQueueNames = getConfiguredQueueNames as jest.MockedFunction<typeof getConfiguredQueueNames>;
-  const RedisMock = Redis as unknown as jest.Mock;
   const QueueMock = Queue as unknown as jest.Mock;
 
   beforeEach(() => {
@@ -38,10 +35,7 @@ describe('jobAdminService', () => {
 
   it('should combine configured and persisted queue names into a unique sorted list', async () => {
     mockedGetConfiguredQueueNames.mockReturnValue(['queue-b', 'queue-a']);
-    RedisMock.mockImplementation(() => ({
-      smembers: jest.fn().mockResolvedValue(['queue-c', 'queue-b']),
-      disconnect: jest.fn(),
-    }));
+    mockSmembers.mockImplementation(jest.fn().mockResolvedValue(['queue-c', 'queue-b']));
 
     const queues = await getDiscoveredQueueNames();
 

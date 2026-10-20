@@ -1,5 +1,4 @@
-import Redis from 'ioredis';
-import { getRedisConnection } from '../config/runtime';
+import { redis } from '../lib/redis';
 import { Logger } from '../lib/logger';
 
 export interface CacheStats {
@@ -10,28 +9,8 @@ export interface CacheStats {
   uptimeSeconds: number;
 }
 
-const chunk = <T>(items: T[], size: number): T[][] => {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-
-  return chunks;
-};
-
-const collectKeys = async (redis: Redis, pattern: string, batchSize: number): Promise<string[]> => {
-  const keys: string[] = [];
-  let cursor = '0';
-
-  do {
-    const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', batchSize);
-    cursor = nextCursor;
-    keys.push(...batch);
-  } while (cursor !== '0');
-
-  return keys;
-};
+/** Upper bound on keys examined per clearCache call. */
+export const MAX_KEYS_PER_CALL = 100_000;
 
 export interface ClearCacheOptions {
   pattern: string;
@@ -50,81 +29,70 @@ export const clearCache = async (
   options: ClearCacheOptions,
   logger: Logger,
 ): Promise<ClearCacheResult> => {
-  const redis = new Redis(getRedisConnection());
+  const dryRun = Boolean(options.dryRun);
+  logger.info('Scanning Redis keys for cache clear', {
+    pattern: options.pattern,
+    batchSize: options.batchSize,
+    dryRun,
+  });
 
-  try {
-    logger.info('Scanning Redis keys for cache clear', {
-      pattern: options.pattern,
-      batchSize: options.batchSize,
-      dryRun: Boolean(options.dryRun),
-    });
+  let cursor = '0';
+  let matchedKeys = 0;
+  let deletedKeys = 0;
 
-    const keys = await collectKeys(redis, options.pattern, options.batchSize);
+  do {
+    const [nextCursor, batch] = await redis.scan(
+      cursor,
+      'MATCH',
+      options.pattern,
+      'COUNT',
+      options.batchSize,
+    );
+    cursor = nextCursor;
+    matchedKeys += batch.length;
 
-    if (options.dryRun || keys.length === 0) {
-      logger.info('Cache clear scan completed', {
-        matchedKeys: keys.length,
-        deletedKeys: 0,
-        dryRun: Boolean(options.dryRun),
-      });
-
-      return {
-        pattern: options.pattern,
-        matchedKeys: keys.length,
-        deletedKeys: 0,
-        dryRun: Boolean(options.dryRun),
-      };
-    }
-
-    let deletedKeys = 0;
-
-    for (const batch of chunk(keys, options.batchSize)) {
+    if (!dryRun && batch.length > 0) {
       deletedKeys += await redis.unlink(...batch);
     }
+  } while (cursor !== '0' && matchedKeys < MAX_KEYS_PER_CALL);
 
-    logger.info('Cache clear completed', {
+  if (cursor !== '0') {
+    logger.warn('Cache clear stopped at per-call key limit; run again to continue', {
       pattern: options.pattern,
-      matchedKeys: keys.length,
-      deletedKeys,
+      limit: MAX_KEYS_PER_CALL,
     });
-
-    return {
-      pattern: options.pattern,
-      matchedKeys: keys.length,
-      deletedKeys,
-      dryRun: false,
-    };
-  } finally {
-    redis.disconnect();
   }
+
+  logger.info('Cache clear completed', {
+    pattern: options.pattern,
+    matchedKeys,
+    deletedKeys,
+    dryRun,
+  });
+
+  return { pattern: options.pattern, matchedKeys, deletedKeys, dryRun };
 };
 
 export const getCacheStats = async (logger: Logger): Promise<CacheStats> => {
-  const redis = new Redis(getRedisConnection());
+  const [infoRaw, totalKeys] = await Promise.all([
+    redis.info('all'),
+    redis.dbsize(),
+  ]);
 
-  try {
-    const [infoRaw, totalKeys] = await Promise.all([
-      redis.info('all'),
-      redis.dbsize(),
-    ]);
+  const extract = (field: string): string => {
+    const match = infoRaw.match(new RegExp(`${field}:(\\S+)`));
+    return match ? match[1] : '0';
+  };
 
-    const extract = (field: string): string => {
-      const match = infoRaw.match(new RegExp(`${field}:(\\S+)`));
-      return match ? match[1] : '0';
-    };
+  const stats: CacheStats = {
+    totalKeys,
+    usedMemoryBytes: parseInt(extract('used_memory'), 10),
+    usedMemoryHuman: extract('used_memory_human'),
+    connectedClients: parseInt(extract('connected_clients'), 10),
+    uptimeSeconds: parseInt(extract('uptime_in_seconds'), 10),
+  };
 
-    const stats: CacheStats = {
-      totalKeys,
-      usedMemoryBytes: parseInt(extract('used_memory'), 10),
-      usedMemoryHuman: extract('used_memory_human'),
-      connectedClients: parseInt(extract('connected_clients'), 10),
-      uptimeSeconds: parseInt(extract('uptime_in_seconds'), 10),
-    };
+  logger.info('Cache stats collected', stats);
 
-    logger.info('Cache stats collected', stats);
-
-    return stats;
-  } finally {
-    redis.disconnect();
-  }
+  return stats;
 };

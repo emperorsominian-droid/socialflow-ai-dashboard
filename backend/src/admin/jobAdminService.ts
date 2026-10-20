@@ -1,6 +1,6 @@
 import { Queue } from 'bullmq';
-import Redis from 'ioredis';
 import { getConfiguredQueueNames, getRedisConnection } from '../config/runtime';
+import { redis } from '../lib/redis';
 import { Logger } from '../lib/logger';
 import { KNOWN_QUEUES_SET_KEY } from './constants';
 
@@ -20,16 +20,10 @@ export interface RetryFailedJobsResult {
 }
 
 export const getDiscoveredQueueNames = async (): Promise<string[]> => {
-  const redis = new Redis(getRedisConnection());
+  const configuredQueues = getConfiguredQueueNames();
+  const persistedQueues = await redis.smembers(KNOWN_QUEUES_SET_KEY);
 
-  try {
-    const configuredQueues = getConfiguredQueueNames();
-    const persistedQueues = await redis.smembers(KNOWN_QUEUES_SET_KEY);
-
-    return Array.from(new Set([...configuredQueues, ...persistedQueues])).sort();
-  } finally {
-    redis.disconnect();
-  }
+  return Array.from(new Set([...configuredQueues, ...persistedQueues])).sort();
 };
 
 export const retryFailedJobs = async (
