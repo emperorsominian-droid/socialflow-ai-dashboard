@@ -1,0 +1,51 @@
+import { readBodyCapped } from '../services/WebhookDispatcher';
+import { uploadUrlSchema } from '../routes/tiktok';
+import { validateEnv } from '../config/config';
+
+jest.mock('../lib/prisma', () => ({ prisma: {} }));
+jest.mock('../lib/metrics', () => ({ webhookDispatchFailed: {}, webhookDispatchTotal: {} }));
+jest.mock('../lib/logger', () => ({ createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }) }));
+jest.mock('../middleware/authenticate', () => ({ authenticate: jest.fn() }));
+jest.mock('../middleware/checkPermission', () => ({ checkPermission: () => jest.fn() }));
+jest.mock('../services/TikTokService', () => ({ tiktokService: {} }));
+jest.mock('../jobs/tiktokVideoJob', () => ({ enqueueTikTokVideoUpload: jest.fn() }));
+jest.mock('../lib/redis', () => ({ saveOAuthState: jest.fn(), consumeOAuthState: jest.fn() }));
+
+describe('#1778 readBodyCapped', () => {
+  it('stops reading and cancels an unbounded stream', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulls++;
+        c.enqueue(new Uint8Array(400).fill(97));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const body = await readBodyCapped(new Response(stream), 1000);
+    expect(body).toHaveLength(1000);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThan(10);
+  });
+});
+
+describe('#1780 uploadUrlSchema', () => {
+  const ok = { videoUrl: 'https://example.com/v.mp4', title: 't' };
+  it('accepts valid input', () => expect(uploadUrlSchema.safeParse(ok).success).toBe(true));
+  it.each([
+    ['file scheme', { ...ok, videoUrl: 'file:///etc/passwd' }],
+    ['http scheme', { ...ok, videoUrl: 'http://example.com/v.mp4' }],
+    ['too long', { ...ok, videoUrl: 'https://e.com/' + 'a'.repeat(3000) }],
+    ['bad privacy', { ...ok, privacyLevel: 'EVERYONE' }],
+  ])('rejects %s', (_n, body) => expect(uploadUrlSchema.safeParse(body).success).toBe(false));
+});
+
+describe('#1779 config', () => {
+  it('fails when Twitter webhook enabled without secret', () => {
+    expect(() =>
+      validateEnv({ ...(process.env as any), TWITTER_WEBHOOK_ENABLED: 'true', TWITTER_WEBHOOK_SECRET: '' }),
+    ).toThrow();
+  });
+});

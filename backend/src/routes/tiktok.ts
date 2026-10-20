@@ -2,15 +2,29 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { Router, Request, Response } from 'express';
+import { z } from 'zod';
 import { authenticate as authMiddleware } from '../middleware/authenticate';
 import { checkPermission } from '../middleware/checkPermission';
 import { tiktokService } from '../services/TikTokService';
 import { enqueueTikTokVideoUpload } from '../jobs/tiktokVideoJob';
-import { dispatchEvent } from '../services/WebhookDispatcher';
+import { dispatchEvent, assertSafeUrl } from '../services/WebhookDispatcher';
 import { createLogger } from '../lib/logger';
 import { saveOAuthState, consumeOAuthState } from '../lib/redis';
 
 const router = Router();
+
+export const uploadUrlSchema = z.object({
+  videoUrl: z
+    .string()
+    .max(2048)
+    .url()
+    .refine((u) => u.startsWith('https://'), 'videoUrl must use https'),
+  title: z.string().min(1).max(150),
+  description: z.string().max(2200).optional(),
+  privacyLevel: z
+    .enum(['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'])
+    .optional(),
+});
 const logger = createLogger('tiktok-routes');
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -211,9 +225,16 @@ router.post(
       return res.status(400).json({ error: 'x-tiktok-token header required.' });
     }
 
-    const { videoUrl, title, description, privacyLevel } = req.body;
-    if (!videoUrl || !title) {
-      return res.status(400).json({ error: 'videoUrl and title are required.' });
+    const parsed = uploadUrlSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid request.' });
+    }
+    const { videoUrl, title, description, privacyLevel } = parsed.data;
+
+    try {
+      await assertSafeUrl(videoUrl);
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
     }
 
     try {

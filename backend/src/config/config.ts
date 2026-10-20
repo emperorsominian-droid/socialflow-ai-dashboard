@@ -76,6 +76,13 @@ const envSchema = z
     // ── Social APIs ───────────────────────────────────────────────────────────
     TWITTER_API_KEY: z.string().min(1, 'TWITTER_API_KEY is required'),
     TWITTER_API_SECRET: z.string().min(1, 'TWITTER_API_SECRET is required'),
+    // Enabling the Twitter webhook requires TWITTER_WEBHOOK_SECRET (enforced in superRefine).
+    TWITTER_WEBHOOK_ENABLED: z
+      .enum(['true', 'false', '1', '0'])
+      .optional()
+      .transform((v) => v === 'true' || v === '1')
+      .default(false),
+    TWITTER_WEBHOOK_SECRET: z.string().optional(),
 
     FACEBOOK_APP_ID: z.string().optional(),
     FACEBOOK_APP_SECRET: z.string().optional(),
@@ -244,6 +251,15 @@ const envSchema = z
     // Billing is enabled whenever STRIPE_SECRET_KEY is set (it is required).
     // Webhook handling needs the signing secret, so require it up front rather
     // than throwing on the first webhook delivery.
+    if (data.TWITTER_WEBHOOK_ENABLED && !data.TWITTER_WEBHOOK_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TWITTER_WEBHOOK_SECRET'],
+        message:
+          'TWITTER_WEBHOOK_SECRET is required when the Twitter webhook is enabled (TWITTER_WEBHOOK_ENABLED=true)',
+      });
+    }
+
     if (data.STRIPE_SECRET_KEY && !data.STRIPE_WEBHOOK_SECRET) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

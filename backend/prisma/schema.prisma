@@ -341,6 +341,12 @@ model CreditLog {
   @@index([createdAt])
 }
 
+model StripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+}
+
 enum PostPlatform {
   instagram
   tiktok

@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import { rawBodyMiddleware } from '../middleware/verifySignature';
 import { twitterWebhookQueue, mapTwitterEvent } from '../queues/twitterWebhookQueue';
 import { createLogger } from '../lib/logger';
+import { config } from '../config/config';
 
 const logger = createLogger('twitter-webhook');
 
@@ -13,7 +14,7 @@ const router = Router();
 const limiter = rateLimit({ windowMs: 60_000, max: 300, standardHeaders: true, legacyHeaders: false });
 
 function getSecret(): string {
-  const secret = process.env.TWITTER_WEBHOOK_SECRET;
+  const secret = config.TWITTER_WEBHOOK_SECRET;
   if (!secret) throw new Error('TWITTER_WEBHOOK_SECRET is not set');
   return secret;
 }
@@ -23,7 +24,7 @@ function getSecret(): string {
  * Twitter CRC (Challenge-Response Check) — required for webhook registration.
  * Twitter sends ?crc_token=<token>; we must respond with an HMAC-SHA256 digest.
  */
-router.get('/', (req: Request, res: Response) => {
+router.get('/', limiter, (req: Request, res: Response) => {
   const crcToken = req.query.crc_token as string | undefined;
   if (!crcToken) {
     res.status(400).json({ error: 'Missing crc_token' });
