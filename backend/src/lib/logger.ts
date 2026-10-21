@@ -16,9 +16,9 @@
  */
 import winston from 'winston';
 import { getRequestId } from '../middleware/requestId';
-import { config } from '../config/config';
+import { config, isProductionLike } from '../config/config';
 
-const isProduction = config.NODE_ENV === 'production';
+const isProduction = isProductionLike(config.NODE_ENV);
 
 // ---------------------------------------------------------------------------
 // Base transports — console always on, file logs in production
@@ -72,7 +72,7 @@ if (config.ELASTICSEARCH_URL) {
         fields: logData.meta ?? {},
         service: {
           name: config.OTEL_SERVICE_NAME,
-          environment: config.NODE_ENV,
+          environment: config.APP_ENV ?? config.NODE_ENV,
         },
       }),
     });

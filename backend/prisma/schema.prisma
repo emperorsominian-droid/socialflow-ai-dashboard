@@ -334,9 +334,11 @@ model CreditLog {
   delta          Int
   balanceAfter   Int
   metadata       Json?
+  referenceId    String?
   createdAt      DateTime     @default(now())
   subscription   Subscription @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
+  @@unique([userId, action, referenceId])
   @@index([userId])
   @@index([createdAt])
 }
