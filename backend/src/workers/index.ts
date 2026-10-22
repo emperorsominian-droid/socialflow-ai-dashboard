@@ -262,7 +262,7 @@ const socialProcessors: Record<SocialJobType, (job: Job<SocialJobData>) => Promi
       // not left short-changed.
       if (userId && billingService.isConfigured()) {
         try {
-          billingService.refundCredits(userId, 'post:publish', `platform_failure:${platform}`);
+          billingService.refundCredits(userId, 'post:publish', `platform_failure:${platform}`, `${job.id}:${platform}`);
           logger.info('Credits refunded after publish failure', { userId, platform, jobId: job.id });
         } catch (refundErr) {
           // Log but don't mask the original error

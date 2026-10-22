@@ -23,7 +23,7 @@ import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { createLogger } from './lib/logger';
-import { config } from './config/config';
+import { config, isProductionLike } from './config/config';
 
 const logger = createLogger('tracing');
 
@@ -59,7 +59,7 @@ function buildExporter(): SpanExporter {
 
 // #903: Prevent OTEL_DEBUG=true in production — it enables per-span I/O latency logging and degrades performance.
 let isDebug = config.OTEL_DEBUG;
-if (config.NODE_ENV === 'production' && isDebug) {
+if (isProductionLike(config.NODE_ENV) && isDebug) {
   logger.error(
     'CRITICAL: OTEL_DEBUG=true is set in a production environment. ' +
     'This enables verbose per-span logging and degrades performance. ' +
@@ -84,7 +84,7 @@ export const sdk = new NodeSDK({
   resource: resourceFromAttributes({
     [ATTR_SERVICE_NAME]: serviceName,
     [ATTR_SERVICE_VERSION]: process.env.npm_package_version ?? '0.0.0',
-    environment: config.NODE_ENV,
+    environment: config.APP_ENV ?? config.NODE_ENV,
   }),
   spanProcessors: [spanProcessor],
   instrumentations: [

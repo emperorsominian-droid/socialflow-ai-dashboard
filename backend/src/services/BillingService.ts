@@ -197,10 +197,20 @@ export class BillingService {
    * Throws if the subscription is missing, inactive, or has insufficient credits.
    * Returns updated balance.
    */
-  public async deductCredits(userId: string, action: CreditAction): Promise<number> {
+  public async deductCredits(
+    userId: string,
+    action: CreditAction,
+    referenceId?: string,
+  ): Promise<number> {
     const cost = ACTION_COST[action] ?? 1;
 
     return prisma.$transaction(async (tx) => {
+      if (referenceId) {
+        const prior = await tx.creditLog.findUnique({
+          where: { userId_action_referenceId: { userId, action, referenceId } },
+        });
+        if (prior) return prior.balanceAfter;
+      }
       const sub = await tx.subscription.findUnique({ where: { userId } });
       if (!sub) throw new NotProvisionedError();
       if (sub.status !== 'active' && sub.status !== 'trialing') {
@@ -221,7 +231,7 @@ export class BillingService {
       // The UPDATE above holds the row lock until commit, so this read is not stale.
       const newBalance = await this.readBalance(tx, userId);
       await tx.creditLog.create({
-        data: { userId, action, delta: -cost, balanceAfter: newBalance },
+        data: { userId, action, delta: -cost, balanceAfter: newBalance, referenceId },
       });
 
       return newBalance;
@@ -273,12 +283,23 @@ export class BillingService {
    * Used when a downstream operation fails after credits have already been deducted.
    * Returns the restored balance.
    */
-  public async refundCredits(userId: string, action: CreditAction, reason?: string): Promise<number> {
+  public async refundCredits(
+    userId: string,
+    action: CreditAction,
+    reason?: string,
+    referenceId?: string,
+  ): Promise<number> {
     const sub = await prisma.subscription.findUnique({ where: { userId } });
     if (!sub) throw new NotProvisionedError();
 
     const cost = ACTION_COST[action] ?? 1;
     const newBalance = await prisma.$transaction(async (tx) => {
+      if (referenceId) {
+        const prior = await tx.creditLog.findUnique({
+          where: { userId_action_referenceId: { userId, action: 'credit:topup', referenceId } },
+        });
+        if (prior) return prior.balanceAfter;
+      }
       const updated = await tx.subscription.update({
         where: { userId },
         data: { creditsRemaining: { increment: cost } },
@@ -290,6 +311,7 @@ export class BillingService {
           delta: cost,
           balanceAfter: updated.creditsRemaining,
           metadata: { reason: reason ?? 'refund', refundedAction: action },
+          referenceId,
         },
       });
       return updated.creditsRemaining;

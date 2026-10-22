@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
-import { config } from '../config/config';
+import { config, isProductionLike } from '../config/config';
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
@@ -31,11 +31,11 @@ const SOFT_DELETE_FILTERED_OPS = new Set([
 const POOL_DEFAULTS = {
   development: { connection_limit: 5,  pool_timeout: 10 },
   test:        { connection_limit: 2,  pool_timeout: 10 },
+  staging:     { connection_limit: 10, pool_timeout: 20 },
   production:  { connection_limit: 10, pool_timeout: 20 },
 } as const;
 
-function buildDatasourceUrl(): string {
-  const base = config.DATABASE_URL;
+function resolvePoolConfig(): { connectionLimit: number; poolTimeout: number } {
   const env = config.NODE_ENV;
   const defaults = POOL_DEFAULTS[env];
 
@@ -55,16 +55,12 @@ function buildDatasourceUrl(): string {
     connectionLimit = 1;
   }
 
-  const url = new URL(base);
-  url.searchParams.set('connection_limit', String(connectionLimit));
-  url.searchParams.set('pool_timeout',     String(poolTimeout));
-
   console.log(
     `[prisma] Effective pool config — connection_limit: ${connectionLimit}, ` +
     `pool_timeout: ${poolTimeout}s, pgbouncer_mode: ${config.PGBOUNCER_MODE ?? false}`,
   );
 
-  return url.toString();
+  return { connectionLimit, poolTimeout };
 }
 
 /**
@@ -75,8 +71,14 @@ function buildDatasourceUrl(): string {
  * 3. Tracing — wraps every query in an OpenTelemetry span
  */
 function createExtendedClient() {
-  const connectionString = buildDatasourceUrl();
-  const adapter = new PrismaPg({ connectionString });
+  // The pg driver adapter ignores Prisma-engine URL params (connection_limit,
+  // pool_timeout); pooling is configured on the underlying pg.Pool instead.
+  const { connectionLimit, poolTimeout } = resolvePoolConfig();
+  const adapter = new PrismaPg({
+    connectionString: config.DATABASE_URL,
+    max: connectionLimit,
+    connectionTimeoutMillis: poolTimeout * 1000,
+  });
   const base = new PrismaClient({ adapter });
 
   return base.$extends({
@@ -91,7 +93,11 @@ function createExtendedClient() {
           // ── Soft delete ────────────────────────────────────────────────
           if (SOFT_DELETE_MODELS.has(model)) {
             if (operation === 'delete') {
-              return query({ ...args, data: { deletedAt: new Date() } });
+              const where = args.__orgId ? { ...args.where, organizationId: args.__orgId } : args.where;
+              return (base as any)[model.charAt(0).toLowerCase() + model.slice(1)].update({
+                where,
+                data: { deletedAt: new Date() },
+              });
             }
             if (operation === 'deleteMany') {
               return (base as any)[model.charAt(0).toLowerCase() + model.slice(1)].updateMany({
@@ -181,4 +187,4 @@ function createExtendedClient() {
 
 export const prisma = globalForPrisma.prisma ?? (createExtendedClient() as unknown as PrismaClient);
 
-if (config.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+if (!isProductionLike(config.NODE_ENV)) globalForPrisma.prisma = prisma;

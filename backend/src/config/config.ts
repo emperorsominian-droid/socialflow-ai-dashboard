@@ -8,7 +8,9 @@ const JWT_SECRET_MIN_LENGTH = 32;
 const envSchema = z
   .object({
     // ── Server ────────────────────────────────────────────────────────────────
-    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    NODE_ENV: z.enum(['development', 'staging', 'production', 'test']).default('development'),
+    // Free-form deployment label for dashboards/telemetry; defaults to NODE_ENV.
+    APP_ENV: z.string().optional(),
     BACKEND_PORT: z.coerce.number().int().positive().default(3001),
     CORS_ALLOWED_ORIGINS: z.string().optional(),
 
@@ -347,5 +349,9 @@ export const config = new Proxy({} as Env, {
     return (_config as Record<string | symbol, unknown>)[prop];
   },
 });
+
+/** True for environments that must use strict (non-debug, non-wildcard) behaviour. */
+export const isProductionLike = (env: Env['NODE_ENV']): boolean =>
+  env === 'production' || env === 'staging';
 
 export { validateEnv };

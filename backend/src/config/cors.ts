@@ -1,6 +1,6 @@
 import { CorsOptions } from 'cors';
 import { ForbiddenError } from '../lib/errors';
-import { config } from './config';
+import { config, isProductionLike } from './config';
 
 /**
  * Allowed origins per environment.
@@ -15,6 +15,8 @@ const ALLOWED_ORIGINS: Record<string, string[]> = {
   development: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000'],
   test: ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:3000'],
   production: ['https://socialflow.app', 'https://www.socialflow.app'],
+  // Staging is production-like; set CORS_ALLOWED_ORIGINS to its real origins.
+  staging: [],
 };
 
 // Read the same NODE_ENV value the rest of the app validates against, rather
@@ -38,7 +40,7 @@ export const allowedOrigins: string[] = configuredOrigins !== undefined
 export const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
     // Allow server-to-server requests (no Origin header) only outside production
-    if (!origin && env !== 'production') return callback(null, true);
+    if (!origin && !isProductionLike(env)) return callback(null, true);
     if (origin && allowedOrigins.includes(origin)) return callback(null, true);
     callback(new ForbiddenError('Origin not allowed by CORS policy', 'CORS_ORIGIN_FORBIDDEN'));
   },
